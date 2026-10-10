@@ -5,11 +5,11 @@
 Ne'ma is a food rescue platform that connects restaurants and bakeries with
 surplus food to verified charities that need food for distribution.
 
-This repository currently contains **Phase 1 and Phase 2**: the project
+This repository currently contains **Phases 1 through 4**: the project
 scaffold — a React frontend and an Express backend with a health-check
-endpoint — plus the PostgreSQL database: a schema for users, organizations,
-food listings, food requests, and donations, an automated setup script, and
-development seed data. No authentication or dashboards yet.
+endpoint — the PostgreSQL database, JWT authentication with roles and
+organization verification, and the food listing API for both sides of the
+marketplace. React pages for these features are not built yet.
 
 ## Tech stack
 
@@ -29,15 +29,18 @@ nema/
 │   ├── db/
 │   │   └── schema.sql           # the whole database schema (single source of truth)
 │   ├── package.json
-│   └── src/
-│       ├── server.js            # entry point — starts the HTTP server
-│       ├── app.js               # builds the Express app (testable, no port)
-│       ├── config/              # env + database configuration
-│       ├── database/            # pg pool, query helper, schema setup, seed data
-│       ├── routes/              # URL → controller wiring, all under /api
-│       ├── controllers/         # HTTP concerns only
-│       ├── services/            # business logic
-│       └── middleware/          # 404 + centralized error handler
+│   ├── src/
+│   │   ├── server.js            # entry point — starts the HTTP server
+│   │   ├── app.js               # builds the Express app (testable, no port)
+│   │   ├── config/              # env + database configuration
+│   │   ├── database/            # pg pool, query helper, schema setup, seed data
+│   │   ├── routes/              # URL → controller wiring, all under /api
+│   │   ├── controllers/         # HTTP concerns only
+│   │   ├── services/            # business logic
+│   │   ├── middleware/          # auth guards, 404, centralized error handler
+│   │   └── utils/               # request validation and error helpers
+│   └── tests/
+│       └── api.test.mjs         # end-to-end API checks (see "Testing the API")
 │
 ├── docs/
 │   └── database.md              # schema, relationships, and seed data explained
@@ -68,8 +71,12 @@ nema/
 - **db/schema.sql** holds the entire schema in one reviewable file. It is
   applied by `npm run db:setup` rather than by hand, so the schema in git and
   the schema in the database cannot drift.
-- **middleware** centralizes 404s and error handling instead of repeating
-  try/catch in every controller.
+- **middleware** centralizes cross-cutting concerns instead of repeating
+  them in every controller: authentication and role checks run before a
+  handler, and 404s and error handling are caught in one place.
+- **utils** holds the request validator and the error helpers. The validator
+  rejects any body field the endpoint did not declare, which is what stops a
+  client from smuggling `role` or `verificationStatus` through registration.
 
 ## Prerequisites
 
@@ -124,6 +131,7 @@ confirms the frontend reaches the backend through the dev proxy.
 | backend  | `npm run db:setup` | Applies `db/schema.sql` (schema only)        |
 | backend  | `npm run db:seed`  | Loads development seed data                  |
 | backend  | `npm run db:reset` | Applies the schema **and** seeds the data   |
+| backend  | `npm run test:api` | Runs the end-to-end API checks (server must be running) |
 | frontend | `npm run dev` | Starts the Vite dev server                  |
 | frontend | `npm run build` | Builds the frontend for production        |
 | frontend | `npm run preview` | Serves the production build locally       |
@@ -166,6 +174,21 @@ reasoning behind each constraint.
 
 ## API
 
+All routes are under `/api`. Every response is JSON.
+
+### Authentication
+
+Send the token from `POST /auth/login` on every private request:
+
+```bash
+curl -H "Authorization: Bearer <token>" http://localhost:3001/api/auth/me
+```
+
+The token proves identity only. Role, active status, organization and
+verification status are re-read from the database on each request, so an
+account that was deactivated or an organization that was just rejected takes
+effect immediately — a stale token cannot keep acting with old privileges.
+
 ### `GET /api/health`
 
 Health check for the backend.
@@ -185,6 +208,129 @@ Unknown routes return `404` with a JSON error body.
 curl http://localhost:3001/api/health
 ```
 
+### Auth
+
+| Method | Path                | Auth   | Notes                                      |
+| ------ | ------------------- | ------ | ------------------------------------------ |
+| POST   | `/auth/register`    | public | Creates a user **and** its organization. Accepts `role` of `RESTAURANT` or `CHARITY` only — `ADMIN` accounts are not self-service. New organizations always start `PENDING`. |
+| POST   | `/auth/login`       | public | Returns `{ token, user }`.                 |
+| GET    | `/auth/me`          | token  | Current profile.                           |
+| PATCH  | `/auth/me`          | token  | Updates `firstName`, `lastName`, `phone`, or password via `currentPassword` + `newPassword`. |
+
+```bash
+curl -X POST http://localhost:3001/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "role": "RESTAURANT",
+    "email": "owner@bakery.example.com",
+    "password": "SomeLongPassword1!",
+    "firstName": "Sara",
+    "lastName": "Al-Tamimi",
+    "organization": { "type": "RESTAURANT", "name": "Golden Oven", "city": "Riyadh" }
+  }'
+
+curl -X POST http://localhost:3001/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "nema.admin@example.com", "password": "DevPassword123!"}'
+```
+
+Unknown body fields are **rejected**, not ignored, so a privilege field
+cannot slip through on a typo.
+
+### Organizations
+
+| Method | Path                          | Auth    | Notes                                        |
+| ------ | ----------------------------- | ------- | -------------------------------------------- |
+| GET    | `/organizations`              | token   | Admins see every organization; other roles see only verified ones plus their own. Filter with `?status=PENDING`. |
+| GET    | `/organizations/:id`          | token   | Same visibility rules.                       |
+| PATCH  | `/organizations/:id/verify`   | **ADMIN** | Body `{ "decision": "VERIFIED" \| "REJECTED", "note": "..." }`. The only endpoint that can change verification status. |
+
+### Food listings — restaurant side
+
+Requires the `RESTAURANT` role. Publishing additionally requires a verified
+organization.
+
+| Method | Path                              | Notes                                          |
+| ------ | --------------------------------- | ---------------------------------------------- |
+| POST   | `/food-listings`                  | Requires `VERIFIED`. Body: `foodName`, `category`, `totalQuantity`, `unit`, `pickupLocation`, `pickupDeadline`, plus optional `description`, `safetyInfo`, `useByDeadline`. |
+| GET    | `/food-listings`                  | Own organization's listings. `?status=ACTIVE`. |
+| GET    | `/food-listings/:id`              | One of your own.                               |
+| PATCH  | `/food-listings/:id`              | Partial update. `availableQuantity` and `status` cannot be set directly. |
+| PATCH  | `/food-listings/:id/cancel`       | Body `{ "reason": "..." }`.                    |
+| GET    | `/food-listings/:id/requests`     | Incoming requests for that listing.            |
+
+Categories: `BAKERY`, `PREPARED_MEALS`, `PRODUCE`, `DAIRY`, `MEAT`,
+`PACKAGED`, `OTHER`. Units: `PORTIONS`, `KILOGRAMS`, `LITRES`, `ITEMS`,
+`BOXES`.
+
+`availableQuantity` is excluded from updates on purpose: it only moves as
+requests are accepted, so a restaurant cannot silently un-promise food.
+Reducing `totalQuantity` below what is already reserved is refused with
+`400 TOTAL_BELOW_AVAILABLE`.
+
+### Listings — charity side
+
+Requires the `CHARITY` role **and** a verified organization.
+
+| Method | Path                        | Notes                                          |
+| ------ | --------------------------- | ---------------------------------------------- |
+| GET    | `/browse/listings`          | Active, available, unexpired listings from verified organizations. Filter with `?category=BAKERY` or `?pickupBefore=2026-10-12T18:00:00Z`. |
+| GET    | `/browse/listings/:id`      | Full details for one listing.                  |
+
+### Deadlines and safety
+
+`pickupDeadline` and `useByDeadline` are separate fields and neither implies
+the other. `pickupDeadline` is a logistics deadline — after it the restaurant
+is no longer there to hand food over. `useByDeadline` is the restaurant's own
+estimate of how long the food stays fit to eat.
+
+**An unexpired listing is not a safe listing.** Nothing in the API derives
+food safety from a deadline being in the future; charities are shown
+`safetyInfo` and `useByDeadline` and decide for themselves. Expiry is computed
+at read time rather than stored, so a listing stops being collectable the
+moment its pickup deadline passes, with no background job required.
+
+### Errors
+
+Every failure returns the same shape:
+
+```json
+{
+  "error": "ApiError",
+  "code": "ORGANIZATION_NOT_VERIFIED",
+  "message": "Your organization is PENDING. An administrator must verify it before you can participate in donations."
+}
+```
+
+`code` is stable and safe to switch on; `message` is human-readable. Validation
+failures include a `details` array of `{ field, message }`.
+
+| Status | Meaning                                             |
+| ------ | --------------------------------------------------- |
+| 400    | Malformed input, failed validation, invalid state   |
+| 401    | Missing, invalid, or expired token                  |
+| 403    | Authenticated but not permitted — wrong role, unverified organization |
+| 404    | Not found, or not yours to see                      |
+| 409    | Conflicts with existing data, e.g. duplicate email   |
+| 500    | Unexpected server failure                           |
+
+## Testing the API
+
+`backend/tests/api.test.mjs` is an end-to-end suite covering login,
+registration, privilege-escalation attempts, role and verification gates,
+cross-organization isolation, listing edit/cancel rules, and expiry. It
+expects a seeded database and a running server.
+
+```bash
+cd backend
+npm run db:reset     # schema + seed
+npm run dev          # in a second terminal
+npm run test:api
+```
+
+It runs against whatever `DATABASE_URL` and `PORT` are configured, and exits
+non-zero if any check fails.
+
 ## Environment variables
 
 ### Backend (`backend/.env`)
@@ -194,6 +340,9 @@ curl http://localhost:3001/api/health
 | `PORT`          | `3001`                     | Port the API listens on          |
 | `NODE_ENV`      | `development`              | Environment name                 |
 | `DATABASE_URL`  | `postgres://localhost:5432/nema` | PostgreSQL connection string — read by the app and by `npm run db:setup` |
+| `JWT_SECRET`    | *(ephemeral in dev)*       | Signing key for access tokens. Generate one with `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`. If unset in development the server still boots but every token is rejected after a restart; production refuses to start unless it is set and at least 32 characters. |
+| `JWT_EXPIRES_IN`| `1d`                       | Access token lifetime, e.g. `15m`, `2h`, `1d` |
+| `BCRYPT_ROUNDS` | `10`                       | Password hashing cost. Raising it makes login slower and cracking slower still. |
 
 ### Frontend (`frontend/.env`)
 
@@ -214,6 +363,6 @@ only talks to one origin. This avoids CORS configuration during development.
 
 - [x] Phase 1 — project scaffold, health check, database groundwork
 - [x] Phase 2 — PostgreSQL schema, setup script, and seed data
-- [ ] Phase 3 — JWT authentication and roles
-- [ ] Phase 4 — food listings and matching
+- [x] Phase 3 — JWT authentication, roles, and organization verification
+- [x] Phase 4 — food listings and matching
 - [ ] Phase 5 — charity and restaurant dashboards

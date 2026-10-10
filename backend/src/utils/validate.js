@@ -167,6 +167,36 @@ export class Validator {
     return this;
   }
 
+  // Parses an ISO-8601 timestamp and hands back a normalized string. Used
+  // for pickup and use-by deadlines, where "is this even a date?" and "is it
+  // in the future?" are separate questions — the future check needs the
+  // surrounding context (e.g. a deadline being extended), so it stays with
+  // the caller.
+  isoDate(field, { required = true } = {}) {
+    const raw = this.body[field];
+
+    if (raw === undefined || raw === null || raw === '') {
+      if (required) this.problems.push({ field, message: `${field} is required.` });
+      return this;
+    }
+    if (typeof raw !== 'string') {
+      this.problems.push({ field, message: `${field} must be an ISO-8601 timestamp string.` });
+      return this;
+    }
+
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) {
+      this.problems.push({
+        field,
+        message: `${field} must be a valid ISO-8601 timestamp, e.g. 2026-10-12T18:00:00Z.`,
+      });
+      return this;
+    }
+
+    this.values[field] = parsed.toISOString();
+    return this;
+  }
+
   // Throws a 400 carrying every collected problem, or hands back the
   // normalized values for the service layer to use.
   result() {

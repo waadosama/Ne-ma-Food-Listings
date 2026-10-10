@@ -32,6 +32,7 @@ DROP FUNCTION IF EXISTS set_updated_at();
 DROP TYPE IF EXISTS donation_status;
 DROP TYPE IF EXISTS food_request_status;
 DROP TYPE IF EXISTS food_listing_status;
+DROP TYPE IF EXISTS food_category;
 DROP TYPE IF EXISTS food_unit;
 DROP TYPE IF EXISTS verification_status;
 DROP TYPE IF EXISTS organization_type;
@@ -50,6 +51,11 @@ CREATE TYPE verification_status AS ENUM
 
 CREATE TYPE food_unit AS ENUM
   ('PORTIONS', 'KILOGRAMS', 'LITRES', 'ITEMS', 'BOXES');
+
+-- Coarse grouping so charities can browse by what kind of food they need.
+-- Deliberately few values: this is a filter, not a taxonomy.
+CREATE TYPE food_category AS ENUM
+  ('BAKERY', 'PREPARED_MEALS', 'PRODUCE', 'DAIRY', 'MEAT', 'PACKAGED', 'OTHER');
 
 CREATE TYPE food_listing_status AS ENUM
   ('ACTIVE', 'RESERVED', 'COMPLETED', 'EXPIRED', 'CANCELLED');
@@ -205,6 +211,9 @@ CREATE TABLE food_listings (
 
   food_name          TEXT                NOT NULL,
   description        TEXT,
+  -- Coarse grouping used by the charity browse filter. Separate from
+  -- safety_info: this says what kind of food it is, not how to handle it.
+  category           food_category       NOT NULL DEFAULT 'OTHER',
   -- What it is made of and how it must be handled: allergens, "contains
   -- nuts", "keep chilled", "vegan". Surfaced in the UI so charities can
   -- judge suitability before requesting.
@@ -218,9 +227,19 @@ CREATE TABLE food_listings (
   available_quantity NUMERIC(10, 2)     NOT NULL,
   unit               food_unit          NOT NULL DEFAULT 'PORTIONS',
 
-  -- Where and until when the food can be collected.
+  -- Where and until when the food can be collected. This is a *logistics*
+  -- deadline — after this time the restaurant will not be there to hand the
+  -- food over. It is NOT a statement about whether the food is safe to eat.
   pickup_location    TEXT                NOT NULL,
   pickup_deadline    TIMESTAMPTZ         NOT NULL,
+
+  -- The restaurant's own estimate of how long the food stays fit for
+  -- consumption, tracked separately from pickup_deadline on purpose. A
+  -- batch can be perfectly collectable long after its use-by estimate, and
+  -- safe food can become uncollectable because nobody is at the counter.
+  -- Nothing in the API treats an unexpired listing as safe: charities are
+  -- shown safety_info and use_by_deadline and decide for themselves.
+  use_by_deadline    TIMESTAMPTZ,
 
   status             food_listing_status NOT NULL DEFAULT 'ACTIVE',
   -- Operator note when a listing is cancelled: "spoiled", "collected
@@ -250,6 +269,10 @@ CREATE INDEX food_listings_organization_id_idx
   ON food_listings (organization_id);
 CREATE INDEX food_listings_created_by_user_id_idx
   ON food_listings (created_by_user_id);
+-- The charity browse filter: category, then soonest deadline first.
+CREATE INDEX food_listings_browse_category_idx
+  ON food_listings (category, pickup_deadline)
+  WHERE status = 'ACTIVE' AND available_quantity > 0;
 -- The query every charity dashboard runs: "what is still available,
 -- soonest deadline first?"
 CREATE INDEX food_listings_active_browse_idx

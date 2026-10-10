@@ -39,13 +39,18 @@ export async function listOrganizations({ viewer, status, limit = 50, offset = 0
 
   params.push(limit, offset);
 
+  // Admin with no status filter leaves `filters` empty. Splicing an empty
+  // string in after WHERE yields "WHERE ORDER BY ..." — a syntax error — so
+  // the clause is only emitted when there is something to filter on.
+  const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+
   const { rows } = await query(
     `SELECT o.id, o.type, o.name, o.description, o.contact_email, o.contact_phone,
             o.contact_name, o.address_line, o.city, o.region, o.country,
             o.latitude, o.longitude, o.verification_status, o.verified_at,
             o.created_at
        FROM organizations o
-      WHERE ${filters.join(' AND ')}
+      ${whereClause}
       ORDER BY o.created_at DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
@@ -115,10 +120,15 @@ export async function decideVerification({ organizationId, decision, note, admin
   // be set exactly when the status is VERIFIED, so it is written for an
   // approval and cleared for a rejection. verified_by_user_id records which
   // administrator made the call either way.
+  //
+  // $2 carries an explicit cast. It is used both as the value assigned to an
+  // enum column and in a comparison against an enum literal, and without the
+  // cast Postgres deduces a different type for each use and rejects the
+  // statement with "inconsistent types deduced for parameter $2".
   const { rows } = await query(
     `UPDATE organizations
-        SET verification_status = $2,
-            verified_at         = CASE WHEN $2 = 'VERIFIED' THEN now() ELSE NULL END,
+        SET verification_status = $2::verification_status,
+            verified_at         = CASE WHEN $2::verification_status = 'VERIFIED' THEN now() ELSE NULL END,
             verified_by_user_id = $3
       WHERE id = $1
       RETURNING id, type, name, verification_status, verified_at, updated_at`,

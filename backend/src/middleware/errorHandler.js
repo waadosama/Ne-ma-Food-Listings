@@ -40,13 +40,14 @@ const PG_ERROR_MAP = {
 };
 
 export function errorHandler(err, req, res, next) {
-  // Log the stack in development so failures are easy to trace.
-  if (process.env.NODE_ENV !== 'production') {
-    console.error(err);
-  }
-
   // An error we threw on purpose: trust its status, code and message.
+  //
+  // These are expected outcomes — a wrong password, a missing field, a
+  // role the caller does not have. They are logged one line each, without a
+  // stack, so a real crash is not buried under hundreds of ordinary 4xxs.
   if (err instanceof ApiError) {
+    console.error(`${req.method} ${req.originalUrl} -> ${err.status} ${err.code}: ${err.message}`);
+
     return res.status(err.status).json({
       error: err.name,
       code: err.code,
@@ -59,6 +60,9 @@ export function errorHandler(err, req, res, next) {
   const translate = PG_ERROR_MAP[err.code];
   if (translate) {
     const apiError = translate(err);
+    console.error(
+      `${req.method} ${req.originalUrl} -> ${apiError.status} ${apiError.code} (from PG ${err.code})`
+    );
     return res.status(apiError.status).json({
       error: apiError.name,
       code: apiError.code,
@@ -78,12 +82,19 @@ export function errorHandler(err, req, res, next) {
 
   const status = err.status || 500;
 
+  // Anything reaching here is a genuine failure, so the full stack is worth
+  // having. An unhandled Postgres error is a server bug, not a client
+  // mistake — its code and message are reported as an internal error rather
+  // than being forwarded, so database internals never reach the client.
+  console.error(`${req.method} ${req.originalUrl} -> ${status} UNEXPECTED`, err);
+
   res.status(status).json({
     error: err.name || 'Internal Server Error',
-    code: err.code || 'INTERNAL_ERROR',
+    code: status === 500 ? 'INTERNAL_ERROR' : err.code,
+    // Internal errors get a generic message in production so stack details,
+    // file paths and driver text never reach a client. Everything else — an
+    // explicit 4xx — keeps its own message, which is safe by construction.
     message:
-      status === 500 && process.env.NODE_ENV === 'production'
-        ? 'Something went wrong'
-        : err.message,
+      status === 500 && process.env.NODE_ENV === 'production' ? 'Something went wrong' : err.message,
   });
 }

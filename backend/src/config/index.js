@@ -52,6 +52,23 @@ const config = {
   // slower too; 10 is a reasonable default for an MVP, and the seed uses
   // the same value so hashes stay comparable.
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS) || 10,
+
+  // The single administrator account, created by the seed. Exactly one admin
+  // exists: registration only offers the RESTAURANT and CHARITY roles, so
+  // there is no self-service path to this role and no way to grow a second
+  // admin by accident.
+  //
+  // The password is required to come from the environment. A committed
+  // default would be the most-attacked string in the repository, and the
+  // admin is the only account that can verify organizations and read every
+  // tenant's data. Development falls back to a well-known throwaway value
+  // with a warning; production refuses to seed without one.
+  admin: {
+    email: process.env.ADMIN_EMAIL || 'nema.admin@example.com',
+    password: process.env.ADMIN_PASSWORD || '',
+    firstName: process.env.ADMIN_FIRST_NAME || 'Nema',
+    lastName: process.env.ADMIN_LAST_NAME || 'Admin',
+  },
 };
 
 export default config;

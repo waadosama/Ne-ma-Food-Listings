@@ -9,15 +9,14 @@
     "dev": "node --watch src/server.js",
     "db:setup": "node src/database/setup.js",
     "db:seed": "node src/database/seed.js",
-    "db:reset": "node src/database/setup.js --seed"
+    "db:reset": "node src/database/setup.js --seed",
+    "test:api": "node tests/api.test.mjs"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.16.0"
-  },
-  "devDependencies": {
-    "bcryptjs": "^3.0.3"
   }
 }

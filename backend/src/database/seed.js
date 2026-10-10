@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
+import config from '../config/index.js';
 import { getPool, closePool } from './pool.js';
 
 // Development seed data. Every row is upserted on a natural key (email,
@@ -10,8 +11,50 @@ import { getPool, closePool } from './pool.js';
 // Passwords are hashed here with bcrypt and stored ONLY as hashes — the
 // schema itself refuses anything that does not look like a bcrypt hash.
 
-const PASSWORD = 'DevPassword123!'; // development-only credential
-const SALT_ROUNDS = 10;
+const SALT_ROUNDS = config.bcryptRounds;
+
+// The password shared by the four non-admin accounts. This is a throwaway
+// development fixture, deliberately obvious, and it is fine for it to be in
+// the repository because these accounts hold no privileges an attacker could
+// not get by registering themselves.
+const DEV_PASSWORD = 'DevPassword123!';
+
+// The administrator is different: it is the only account that can verify
+// organizations and read every tenant's listings, so its credential comes
+// from the environment rather than this file. There is exactly one admin and
+// no self-service route to the role — registration only offers RESTAURANT
+// and CHARITY.
+function resolveAdminPassword() {
+  const password = config.admin.password;
+
+  if (password) {
+    if (config.env !== 'production' && password === DEV_PASSWORD) {
+      console.warn(
+        '[seed] ADMIN_PASSWORD is set to the development fixture password. ' +
+          'Choose something unique before this database is shared.'
+      );
+    }
+    return password;
+  }
+
+  if (config.env === 'production') {
+    // Refusing is the right failure mode. Seeding in production without an
+    // explicit admin password would either create an account nobody can log
+    // into or, worse, one everyone can.
+    throw new Error(
+      'ADMIN_PASSWORD must be set in production. Set it in backend/.env — ' +
+        'the seeded administrator is the only account that can verify organizations.'
+    );
+  }
+
+  console.warn(
+    '[seed] ADMIN_PASSWORD is not set — seeding the administrator with the ' +
+      'development fixture password. Set ADMIN_PASSWORD in backend/.env.'
+  );
+  return DEV_PASSWORD;
+}
+
+const ADMIN_PASSWORD = resolveAdminPassword();
 
 // Fixed ids keep downstream fixtures (tests, curl examples) stable. Ids are
 // unique within each table; the previous collision between the restaurant
@@ -26,16 +69,24 @@ const IDS = {
 };
 
 async function seedUsers(client) {
-  const passwordHash = bcrypt.hashSync(PASSWORD, SALT_ROUNDS);
+  // Two hashes because there are two kinds of account: the administrator,
+  // whose credential comes from the environment, and the four development
+  // fixtures, which share the throwaway password. Hashing is done once here
+  // rather than per row — bcrypt is deliberately slow.
+  const adminHash = bcrypt.hashSync(ADMIN_PASSWORD, SALT_ROUNDS);
+  const devHash = bcrypt.hashSync(DEV_PASSWORD, SALT_ROUNDS);
 
+  // The last element of each row picks which credential applies. Only the
+  // admin row uses the environment-sourced one.
   const rows = [
-    [IDS.users.admin, 'ADMIN', 'nema.admin@example.com', 'Nema', 'Admin'],
+    [IDS.users.admin, 'ADMIN', config.admin.email, config.admin.firstName, config.admin.lastName, adminHash],
     [
       IDS.users.restaurant,
       'RESTAURANT',
       'sara.tamimi@goldenoven.example.com',
       'Sara',
       'Al-Tamimi',
+      devHash,
     ],
     [
       IDS.users.restaurant2,
@@ -43,6 +94,7 @@ async function seedUsers(client) {
       'omar.haddad@datepalm.example.com',
       'Omar',
       'Al-Haddad',
+      devHash,
     ],
     [
       IDS.users.charity,
@@ -50,6 +102,7 @@ async function seedUsers(client) {
       'layla.nasser@hopehand.example.com',
       'Layla',
       'Al-Nasser',
+      devHash,
     ],
     [
       IDS.users.charity2,
@@ -57,10 +110,11 @@ async function seedUsers(client) {
       'yusuf.rahman@tableforall.example.com',
       'Yusuf',
       'Al-Rahman',
+      devHash,
     ],
   ];
 
-  for (const [id, role, email, firstName, lastName] of rows) {
+  for (const [id, role, email, firstName, lastName, passwordHash] of rows) {
     await client.query(
       `INSERT INTO users
          (id, role, email, password_hash, first_name, last_name)
@@ -235,6 +289,21 @@ async function linkUsersToOrganizations(client) {
 }
 
 async function seedFoodListings(client) {
+  // Deadlines are computed relative to the moment the seed runs, not
+  // hardcoded. Fixed dates rot: a hardcoded pickup deadline eventually sits
+  // in the past, and the schema's food_listings_deadline_in_future CHECK
+  // then rejects the seed outright.
+  const inHours = (hours) => new Date(Date.now() + hours * 3600_000).toISOString();
+
+  // Row shape: id, org, created_by, name, description, category, safety_info,
+  // total_qty, available_qty, unit, pickup_location, pickup_deadline,
+  // use_by_deadline, status.
+  //
+  // pickup_deadline and use_by_deadline are deliberately different values on
+  // every row: pickup says when the restaurant stops being there, use_by is
+  // the restaurant's own estimate of how long the food stays fit to eat.
+  // Neither implies the other, and the API never derives safety from the
+  // pickup deadline being in the future.
   const rows = [
     [
       IDS.listings.bakery,
@@ -242,12 +311,14 @@ async function seedFoodListings(client) {
       2,
       'Assorted bread and pastries',
       "Today's unsold bread, croissants, and samoon, bagged and ready for same-day collection.",
+      'BAKERY',
       'Contains gluten, dairy, and eggs. Made this morning; keep in a cool place and consume within 24 hours.',
       40,
       25,
       'PORTIONS',
       'Golden Oven Bakery, 12 Tahlia Street, Riyadh — rear service entrance',
-      '2026-10-11T20:00:00Z',
+      inHours(24),
+      inHours(40),
       'ACTIVE',
     ],
     [
@@ -256,12 +327,14 @@ async function seedFoodListings(client) {
       3,
       'Hot lunch trays — mixed rice and grilled chicken',
       'End-of-service hot trays, still safe and above holding temperature.',
+      'PREPARED_MEALS',
       'Contains chicken, rice, and dairy. Allergens: milk. Reheat thoroughly before serving.',
       60,
       45,
       'PORTIONS',
       'Date Palm Kitchen, 44 King Fahd Road, Jeddah — kitchen loading bay',
-      '2026-10-11T15:30:00Z',
+      inHours(6),
+      inHours(12),
       'ACTIVE',
     ],
     [
@@ -270,12 +343,14 @@ async function seedFoodListings(client) {
       2,
       'Surplus fruit boxes',
       'Slightly cosmetic-defect fruit, perfectly edible, from today delivery.',
+      'PRODUCE',
       'Wash before eating. Stored at ambient temperature; no refrigeration required.',
       30,
       30,
       'BOXES',
       'Golden Oven Bakery, 12 Tahlia Street, Riyadh — rear service entrance',
-      '2026-10-12T18:00:00Z',
+      inHours(48),
+      inHours(144),
       'ACTIVE',
     ],
   ];
@@ -283,21 +358,24 @@ async function seedFoodListings(client) {
   for (const r of rows) {
     await client.query(
       `INSERT INTO food_listings
-         (id, organization_id, created_by_user_id, food_name, description, safety_info,
-          total_quantity, available_quantity, unit, pickup_location, pickup_deadline, status)
+         (id, organization_id, created_by_user_id, food_name, description, category,
+          safety_info, total_quantity, available_quantity, unit,
+          pickup_location, pickup_deadline, use_by_deadline, status)
        OVERRIDING SYSTEM VALUE
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (id) DO UPDATE
          SET organization_id    = EXCLUDED.organization_id,
              created_by_user_id = EXCLUDED.created_by_user_id,
              food_name          = EXCLUDED.food_name,
              description        = EXCLUDED.description,
+             category           = EXCLUDED.category,
              safety_info        = EXCLUDED.safety_info,
              total_quantity     = EXCLUDED.total_quantity,
              available_quantity = EXCLUDED.available_quantity,
              unit               = EXCLUDED.unit,
              pickup_location    = EXCLUDED.pickup_location,
              pickup_deadline    = EXCLUDED.pickup_deadline,
+             use_by_deadline    = EXCLUDED.use_by_deadline,
              status             = EXCLUDED.status,
              updated_at         = now()`,
       r
@@ -313,6 +391,11 @@ async function seedFoodListings(client) {
 }
 
 async function seedFoodRequests(client) {
+  // Timestamps are relative to the seed run for the same reason as the
+  // listings: a hardcoded responded_at eventually predates created_at (which
+  // defaults to now()) and trips food_requests_responded_after_created.
+  const inHours = (hours) => new Date(Date.now() + hours * 3600_000).toISOString();
+
   // Note that two different charities are requesting from the SAME listing
   // (listing 1) — the core requirement that listings and requests stay
   // separate so several charities can claim portions of one batch.
@@ -327,8 +410,12 @@ async function seedFoodRequests(client) {
       'We can collect by van this evening and distribute at tonight shelter service.',
       'ACCEPTED',
       2,
-      '2026-10-10T18:00:00Z',
+      inHours(-1),
       'Collected 15 of 40 portions; remainder still available.',
+      // created_at must precede responded_at (food_requests_responded_after_-
+      // created), and both must be explicit or created_at defaults to now()
+      // and lands after the response.
+      inHours(-4),
     ],
     [
       IDS.requests.charityB,
@@ -342,6 +429,7 @@ async function seedFoodRequests(client) {
       null,
       null,
       null,
+      inHours(-3),
     ],
     [
       IDS.requests.charityC,
@@ -355,6 +443,7 @@ async function seedFoodRequests(client) {
       null,
       null,
       null,
+      inHours(-2),
     ],
   ];
 
@@ -362,9 +451,10 @@ async function seedFoodRequests(client) {
     await client.query(
       `INSERT INTO food_requests
          (id, food_listing_id, charity_organization_id, requested_by_user_id,
-          requested_quantity, unit, message, status, responded_by_user_id, responded_at, response_note)
+          requested_quantity, unit, message, status, responded_by_user_id, responded_at,
+          response_note, created_at)
        OVERRIDING SYSTEM VALUE
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (id) DO UPDATE
          SET food_listing_id         = EXCLUDED.food_listing_id,
              charity_organization_id  = EXCLUDED.charity_organization_id,
@@ -376,6 +466,7 @@ async function seedFoodRequests(client) {
              responded_by_user_id     = EXCLUDED.responded_by_user_id,
              responded_at             = EXCLUDED.responded_at,
              response_note            = EXCLUDED.response_note,
+             created_at               = EXCLUDED.created_at,
              updated_at               = now()`,
       r
     );
@@ -390,6 +481,11 @@ async function seedFoodRequests(client) {
 }
 
 async function seedDonations(client) {
+  // Relative timestamps again: collected shortly after the request was
+  // accepted, delivered shortly after that. Fixed dates would drift and
+  // eventually fail donations_delivered_after_collected.
+  const hoursAgo = (hours) => new Date(Date.now() - hours * 3600_000).toISOString();
+
   const rows = [
     [
       IDS.donations.one,
@@ -399,11 +495,11 @@ async function seedDonations(client) {
       4,
       15,
       'PORTIONS',
-      '2026-10-10T19:15:00Z',
+      hoursAgo(3),
       2,
       'Golden Oven Bakery, rear entrance',
       'DELIVERED',
-      '2026-10-10T20:05:00Z',
+      hoursAgo(2.5),
       4,
       'Hope Hand shelter kitchen, 7 Al-Malaz District, Riyadh',
       'Handed over in 3 sealed crates, all within date. Vans arrived 10 minutes early.',
@@ -462,7 +558,14 @@ export default async function seed() {
     await seedDonations(client);
     await client.query('COMMIT');
     console.log('Seed complete.');
-    console.log(`Development login password (all seeded users): ${PASSWORD}`);
+    // Reported separately because they are now different credentials: the
+    // administrator's comes from the environment, the fixtures share the
+    // development password.
+    console.log(`Admin login:        ${config.admin.email}`);
+    console.log(`Development login password (four non-admin users): ${DEV_PASSWORD}`);
+    if (ADMIN_PASSWORD === DEV_PASSWORD) {
+      console.log(`Admin uses that same password (ADMIN_PASSWORD was not set).`);
+    }
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

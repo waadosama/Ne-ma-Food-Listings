@@ -1,7 +1,7 @@
 import * as organizationsService from '../services/organizations.service.js';
 import { validate } from '../utils/validate.js';
 import { asyncHandler } from '../middleware/auth.js';
-import { badRequest } from '../utils/errors.js';
+import { badRequest, forbidden } from '../utils/errors.js';
 
 // GET /api/organizations
 export const list = asyncHandler(async (req, res) => {
