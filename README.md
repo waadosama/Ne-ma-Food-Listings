@@ -5,10 +5,11 @@
 Ne'ma is a food rescue platform that connects restaurants and bakeries with
 surplus food to verified charities that need food for distribution.
 
-This repository currently contains **Phase 1**: the project scaffold — a React
-frontend, an Express backend, a health-check endpoint, and the structure needed
-for PostgreSQL integration in the next phase. No authentication, data models,
-or dashboards yet.
+This repository currently contains **Phase 1 and Phase 2**: the project
+scaffold — a React frontend and an Express backend with a health-check
+endpoint — plus the PostgreSQL database: a schema for users, organizations,
+food listings, food requests, and donations, an automated setup script, and
+development seed data. No authentication or dashboards yet.
 
 ## Tech stack
 
@@ -16,7 +17,7 @@ or dashboards yet.
 | ---------- | ------------------------------- |
 | Frontend   | React + Vite                    |
 | Backend    | Node.js + Express               |
-| Database   | PostgreSQL (next phase)         |
+| Database   | PostgreSQL + `pg`               |
 | API        | REST                            |
 
 ## Project structure
@@ -25,16 +26,21 @@ or dashboards yet.
 nema/
 ├── backend/                     # Express REST API
 │   ├── .env.example             # copy to .env and edit
+│   ├── db/
+│   │   └── schema.sql           # the whole database schema (single source of truth)
 │   ├── package.json
 │   └── src/
 │       ├── server.js            # entry point — starts the HTTP server
 │       ├── app.js               # builds the Express app (testable, no port)
 │       ├── config/              # env + database configuration
-│       ├── database/            # pg pool + query helper (next phase)
+│       ├── database/            # pg pool, query helper, schema setup, seed data
 │       ├── routes/              # URL → controller wiring, all under /api
 │       ├── controllers/         # HTTP concerns only
 │       ├── services/            # business logic
 │       └── middleware/          # 404 + centralized error handler
+│
+├── docs/
+│   └── database.md              # schema, relationships, and seed data explained
 │
 └── frontend/                    # React + Vite
     ├── .env.example
@@ -57,8 +63,11 @@ nema/
   without rewriting any of them.
 - **config** is the only place that reads `process.env`, so settings are not
   scattered across the codebase.
-- **database** is isolated so PostgreSQL can be wired in during the next phase
-  without changing routes or services.
+- **database** isolates everything that talks to PostgreSQL: the connection
+  pool and query helper, plus the schema setup and seed scripts.
+- **db/schema.sql** holds the entire schema in one reviewable file. It is
+  applied by `npm run db:setup` rather than by hand, so the schema in git and
+  the schema in the database cannot drift.
 - **middleware** centralizes 404s and error handling instead of repeating
   try/catch in every controller.
 
@@ -108,13 +117,52 @@ confirms the frontend reaches the backend through the dev proxy.
 
 ### Available scripts
 
-| App      | Script        | What it does                                |
-| -------- | ------------- | ------------------------------------------- |
-| backend  | `npm run dev` | Starts Express with `--watch` auto-reload   |
-| backend  | `npm start`   | Starts Express without auto-reload          |
+| App      | Script         | What it does                                     |
+| -------- | -------------- | ------------------------------------------------ |
+| backend  | `npm run dev`  | Starts Express with `--watch` auto-reload        |
+| backend  | `npm start`    | Starts Express without auto-reload               |
+| backend  | `npm run db:setup` | Applies `db/schema.sql` (schema only)        |
+| backend  | `npm run db:seed`  | Loads development seed data                  |
+| backend  | `npm run db:reset` | Applies the schema **and** seeds the data   |
 | frontend | `npm run dev` | Starts the Vite dev server                  |
 | frontend | `npm run build` | Builds the frontend for production        |
 | frontend | `npm run preview` | Serves the production build locally       |
+
+## Database
+
+Create the database, then load the schema and development seed data:
+
+```bash
+createdb nema                  # or via your SQL client
+cd backend
+npm run db:reset
+```
+
+```
+Connected to postgres://localhost:5432/nema
+Applied schema from db\schema.sql
+Seed complete.
+Development login password (all seeded users): DevPassword123!
+
+Final state:
+  donations        1 row(s)
+  food_listings    3 row(s)
+  food_requests    3 row(s)
+  organizations    4 row(s)
+  users            5 row(s)
+```
+
+`db/schema.sql` is idempotent — it drops and recreates every object — so
+`npm run db:reset` is safe to re-run and always yields a known-clean database.
+It covers five tables: `users`, `organizations`, `food_listings`,
+`food_requests`, and `donations`, with enum types, foreign keys, CHECK
+constraints, and indexes.
+
+See [docs/database.md](docs/database.md) for the entity relationships and the
+reasoning behind each constraint.
+
+> **Seeded passwords are bcrypt hashes, never plain text.** The schema itself
+> refuses to store anything that does not look like a bcrypt hash.
 
 ## API
 
@@ -145,7 +193,7 @@ curl http://localhost:3001/api/health
 | --------------- | -------------------------- | -------------------------------- |
 | `PORT`          | `3001`                     | Port the API listens on          |
 | `NODE_ENV`      | `development`              | Environment name                 |
-| `DATABASE_URL`  | `postgres://localhost:5432/nema` | PostgreSQL connection string (next phase) |
+| `DATABASE_URL`  | `postgres://localhost:5432/nema` | PostgreSQL connection string — read by the app and by `npm run db:setup` |
 
 ### Frontend (`frontend/.env`)
 
@@ -165,7 +213,7 @@ only talks to one origin. This avoids CORS configuration during development.
 ## Roadmap
 
 - [x] Phase 1 — project scaffold, health check, database groundwork
-- [ ] Phase 2 — PostgreSQL schema, models, and CRUD
+- [x] Phase 2 — PostgreSQL schema, setup script, and seed data
 - [ ] Phase 3 — JWT authentication and roles
 - [ ] Phase 4 — food listings and matching
 - [ ] Phase 5 — charity and restaurant dashboards
