@@ -150,7 +150,8 @@ npm run db:reset
 Connected to postgres://localhost:5432/nema
 Applied schema from db\schema.sql
 Seed complete.
-Development login password (all seeded users): DevPassword123!
+Admin login:        nema.admin@example.com
+Development login password (four non-admin users): DevPassword123!
 
 Final state:
   donations        1 row(s)
@@ -231,11 +232,29 @@ curl -X POST http://localhost:3001/api/auth/register \
 
 curl -X POST http://localhost:3001/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email": "nema.admin@example.com", "password": "DevPassword123!"}'
+  -d '{"email": "nema.admin@example.com", "password": "<ADMIN_PASSWORD from backend/.env>"}'
 ```
 
 Unknown body fields are **rejected**, not ignored, so a privilege field
 cannot slip through on a typo.
+
+### The administrator account
+
+There is exactly **one admin**, and there is no self-service route to it —
+registration only offers `RESTAURANT` and `CHARITY`, so the role cannot be
+registered into or escalated to. It is created by `npm run db:reset` from
+`ADMIN_EMAIL` / `ADMIN_PASSWORD` in `backend/.env`.
+
+Those two values are deliberately not committed. The admin is the only
+account that can verify organizations and read every tenant's listings, so
+its password comes from the environment rather than the repository. In
+development a missing `ADMIN_PASSWORD` seeds a well-known throwaway value
+and warns; production refuses to seed at all.
+
+The admin **oversees** the platform rather than operating in it. It can read
+every organization, every listing, and every listing's incoming requests —
+but it belongs to no organization, so it cannot publish, edit, or cancel a
+listing. Those stay with the restaurant that owns it.
 
 ### Organizations
 
@@ -253,11 +272,15 @@ organization.
 | Method | Path                              | Notes                                          |
 | ------ | --------------------------------- | ---------------------------------------------- |
 | POST   | `/food-listings`                  | Requires `VERIFIED`. Body: `foodName`, `category`, `totalQuantity`, `unit`, `pickupLocation`, `pickupDeadline`, plus optional `description`, `safetyInfo`, `useByDeadline`. |
-| GET    | `/food-listings`                  | Own organization's listings. `?status=ACTIVE`. |
-| GET    | `/food-listings/:id`              | One of your own.                               |
-| PATCH  | `/food-listings/:id`              | Partial update. `availableQuantity` and `status` cannot be set directly. |
-| PATCH  | `/food-listings/:id/cancel`       | Body `{ "reason": "..." }`.                    |
-| GET    | `/food-listings/:id/requests`     | Incoming requests for that listing.            |
+| GET    | `/food-listings`                  | Your organization's listings. `?status=ACTIVE`. `ADMIN` sees **every** organization's listings instead. |
+| GET    | `/food-listings/:id`              | One of your own. `ADMIN` may read any.         |
+| PATCH  | `/food-listings/:id`              | Partial update. `availableQuantity` and `status` cannot be set directly. Restaurant only — `ADMIN` gets `403`. |
+| PATCH  | `/food-listings/:id/cancel`       | Body `{ "reason": "..." }`. Restaurant only — `ADMIN` gets `403`. |
+| GET    | `/food-listings/:id/requests`     | Incoming requests for that listing. `ADMIN` may read any listing's. |
+
+The `ADMIN` role reads everything but writes nothing here. It belongs to no
+organization, so letting it publish or edit would mean acting on a tenant's
+behalf; disputes are resolved by inspecting the data, not by editing it.
 
 Categories: `BAKERY`, `PREPARED_MEALS`, `PRODUCE`, `DAIRY`, `MEAT`,
 `PACKAGED`, `OTHER`. Units: `PORTIONS`, `KILOGRAMS`, `LITRES`, `ITEMS`,
@@ -318,8 +341,9 @@ failures include a `details` array of `{ field, message }`.
 
 `backend/tests/api.test.mjs` is an end-to-end suite covering login,
 registration, privilege-escalation attempts, role and verification gates,
-cross-organization isolation, listing edit/cancel rules, and expiry. It
-expects a seeded database and a running server.
+cross-organization isolation, listing edit/cancel rules, expiry, and the
+administrator's read-across-every-tenant access. It expects a seeded
+database and a running server.
 
 ```bash
 cd backend
@@ -329,7 +353,9 @@ npm run test:api
 ```
 
 It runs against whatever `DATABASE_URL` and `PORT` are configured, and exits
-non-zero if any check fails.
+non-zero if any check fails. It reads `ADMIN_EMAIL` / `ADMIN_PASSWORD` from
+`backend/.env` so it can act as the administrator, matching whatever the seed
+provisioned.
 
 ## Environment variables
 
@@ -343,6 +369,10 @@ non-zero if any check fails.
 | `JWT_SECRET`    | *(ephemeral in dev)*       | Signing key for access tokens. Generate one with `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`. If unset in development the server still boots but every token is rejected after a restart; production refuses to start unless it is set and at least 32 characters. |
 | `JWT_EXPIRES_IN`| `1d`                       | Access token lifetime, e.g. `15m`, `2h`, `1d` |
 | `BCRYPT_ROUNDS` | `10`                       | Password hashing cost. Raising it makes login slower and cracking slower still. |
+| `ADMIN_EMAIL`   | `nema.admin@example.com`   | Email of the single administrator created by `npm run db:reset`. |
+| `ADMIN_PASSWORD`| *(none)*                   | Password for that administrator. **Required in production** — the seed refuses to run without it. In development a missing value seeds a well-known throwaway password and warns. Generate one with `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"`. |
+| `ADMIN_FIRST_NAME` | `Nema`                  | Display name for the seeded administrator.      |
+| `ADMIN_LAST_NAME`  | `Admin`                 | Display name for the seeded administrator.      |
 
 ### Frontend (`frontend/.env`)
 

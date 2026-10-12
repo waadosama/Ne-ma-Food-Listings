@@ -3,6 +3,7 @@ import healthRoutes from './health.routes.js';
 import authRoutes from './auth.routes.js';
 import organizationsRoutes from './organizations.routes.js';
 import foodListingsRoutes from './foodListings.routes.js';
+import foodRequestsRoutes from './foodRequests.routes.js';
 import browseRoutes from './browse.routes.js';
 
 // Central mount point: every feature route file is registered here and all
@@ -22,6 +23,7 @@ router.use('/', healthRoutes);
 router.use('/auth', authRoutes);
 router.use('/organizations', organizationsRoutes);
 router.use('/food-listings', foodListingsRoutes);
+router.use('/requests', foodRequestsRoutes);
 router.use('/browse/listings', browseRoutes);
 
 export default router;

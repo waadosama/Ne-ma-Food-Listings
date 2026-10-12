@@ -1,4 +1,6 @@
 import { query } from '../database/query.js';
+import { withTransaction } from '../database/transaction.js';
+import { cancelRequestsForListing } from './foodRequests.service.js';
 import { notFoundError, badRequest } from '../utils/errors.js';
 
 // Food listing operations for both sides of the marketplace.
@@ -180,28 +182,56 @@ export async function updateListing({ user, id, input }) {
 
 // Cancelling is a status change, not a delete: the row stays so any
 // requests already made against it keep their history.
+//
+// It is also the one listing write that has to settle other rows, so it
+// runs in a transaction: a charity must not be left holding an ACCEPTED
+// reservation against food the restaurant has just withdrawn. The open
+// requests are cancelled and their quantities returned before the listing
+// itself is retired, all under the single row lock taken below.
 export async function cancelListing({ user, id, reason }) {
-  const listing = await loadOwnedListing({ user, id });
-
-  if (listing.status === 'CANCELLED') {
-    throw badRequest('ALREADY_CANCELLED', 'That listing has already been cancelled.');
-  }
-  if (!EDITABLE_STATUSES.includes(listing.status)) {
-    throw badRequest(
-      'NOT_CANCELABLE',
-      `A ${listing.status} listing cannot be cancelled.`
+  return withTransaction(async (client) => {
+    // Locked read on the same connection as the writes that follow, so the
+    // status checked here cannot go stale between the check and the UPDATE.
+    const locked = await client.query(
+      `SELECT ${LISTING_COLUMNS_PLAIN}
+         FROM food_listings
+        WHERE id = $1 AND organization_id = $2
+        FOR UPDATE`,
+      [id, user.organizationId]
     );
-  }
 
-  const { rows } = await query(
-    `UPDATE food_listings
-        SET status = 'CANCELLED', cancellation_reason = $3
-      WHERE id = $1 AND organization_id = $2
-      RETURNING ${LISTING_COLUMNS_PLAIN}`,
-    [id, user.organizationId, reason]
-  );
+    if (locked.rows.length === 0) {
+      throw notFoundError('LISTING_NOT_FOUND', 'That listing does not exist.');
+    }
+    const listing = locked.rows[0];
 
-  return toPublicListing(rows[0]);
+    if (listing.status === 'CANCELLED') {
+      throw badRequest('ALREADY_CANCELLED', 'That listing has already been cancelled.');
+    }
+    if (!EDITABLE_STATUSES.includes(listing.status)) {
+      throw badRequest(
+        'NOT_CANCELABLE',
+        `A ${listing.status} listing cannot be cancelled.`
+      );
+    }
+
+    await cancelRequestsForListing(client, {
+      listing,
+      actorUserId: user.id,
+      actorRole: user.role,
+      note: reason ?? 'Listing withdrawn by the restaurant.',
+    });
+
+    const updated = await client.query(
+      `UPDATE food_listings
+          SET status = 'CANCELLED', cancellation_reason = $3
+        WHERE id = $1 AND organization_id = $2
+        RETURNING ${LISTING_COLUMNS_PLAIN}`,
+      [id, user.organizationId, reason]
+    );
+
+    return toPublicListing(updated.rows[0]);
+  });
 }
 
 // The requests this listing has attracted — the restaurant's inbox for a

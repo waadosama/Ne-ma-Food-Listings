@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import * as foodListingsController from '../controllers/foodListings.controller.js';
+import * as foodRequestsController from '../controllers/foodRequests.controller.js';
 import { authenticate, requireRole, requireVerifiedOrg } from '../middleware/auth.js';
 
 const router = Router();
@@ -41,5 +42,16 @@ router.get('/:id/requests', requireRole('RESTAURANT', 'ADMIN'), foodListingsCont
 // restaurant that owns it.
 router.patch('/:id', requireRole('RESTAURANT'), foodListingsController.update);
 router.patch('/:id/cancel', requireRole('RESTAURANT'), foodListingsController.cancel);
+
+// Approving or rejecting a request. The path carries the listing so
+// ownership is part of the URL, but the service still scopes the lock by
+// organization_id: a route guard alone is never the only thing standing
+// between one restaurant and another's requests. ADMIN is excluded — it
+// oversees the platform and never decides on a tenant's behalf.
+router.patch(
+  '/:id/requests/:requestId',
+  requireRole('RESTAURANT'),
+  foodRequestsController.decide
+);
 
 export default router;

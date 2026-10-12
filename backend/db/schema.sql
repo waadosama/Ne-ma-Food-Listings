@@ -22,6 +22,7 @@
 -- else falls in normal reverse dependency order.
 -- ---------------------------------------------------------------------
 DROP TABLE IF EXISTS donations CASCADE;
+DROP TABLE IF EXISTS food_request_events CASCADE;
 DROP TABLE IF EXISTS food_requests CASCADE;
 DROP TABLE IF EXISTS food_listings CASCADE;
 DROP TABLE IF EXISTS organizations CASCADE;
@@ -30,6 +31,7 @@ DROP TABLE IF EXISTS users CASCADE;
 DROP FUNCTION IF EXISTS set_updated_at();
 
 DROP TYPE IF EXISTS donation_status;
+DROP TYPE IF EXISTS food_request_event_type;
 DROP TYPE IF EXISTS food_request_status;
 DROP TYPE IF EXISTS food_listing_status;
 DROP TYPE IF EXISTS food_category;
@@ -62,6 +64,14 @@ CREATE TYPE food_listing_status AS ENUM
 
 CREATE TYPE food_request_status AS ENUM
   ('PENDING', 'ACCEPTED', 'REJECTED', 'CANCELLED', 'COMPLETED');
+
+-- The kind of state change a food_request went through. Kept separate from
+-- the status enum because one status can be reached more than one way
+-- (CANCELLED by the charity, or because the restaurant cancelled the whole
+-- listing) and an audit trail has to tell those apart.
+CREATE TYPE food_request_event_type AS ENUM
+  ('REQUESTED', 'APPROVED', 'REJECTED', 'CANCELLED',
+   'COLLECTION_CONFIRMED', 'LISTING_CANCELLED');
 
 CREATE TYPE donation_status AS ENUM
   ('COLLECTED', 'IN_TRANSIT', 'DELIVERED');
@@ -365,6 +375,62 @@ CREATE UNIQUE INDEX food_requests_open_unique
 CREATE TRIGGER food_requests_set_updated_at
   BEFORE UPDATE ON food_requests
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =====================================================================
+-- food_request_events
+-- Append-only audit trail for a request's state changes: who did what,
+-- when, from which status to which, and what the listing had left
+-- afterwards. Every write path in foodRequests.service.js appends one row
+-- inside the same transaction as the change itself, so the history can
+-- never disagree with the row it describes.
+--
+-- Append-only means exactly that: no UPDATE, no DELETE, and deliberately
+-- no updated_at column or trigger — an audit record that can be rewritten
+-- is not an audit record. That is also why this is a table rather than the
+-- status column alone: "PENDING -> CANCELLED by the charity at 14:02" and
+-- "PENDING -> CANCELLED because the restaurant withdrew the listing at
+-- 14:05" are the same status and completely different facts.
+-- =====================================================================
+CREATE TABLE food_request_events (
+  id                     BIGINT              GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  food_request_id        BIGINT              NOT NULL REFERENCES food_requests (id) ON DELETE CASCADE,
+  -- Denormalised so an audit query can filter by listing without joining
+  -- through the request, and so the trail survives a request row change.
+  food_listing_id        BIGINT              NOT NULL REFERENCES food_listings (id) ON DELETE CASCADE,
+
+  event_type             food_request_event_type NOT NULL,
+  -- Who acted. NULL only if the account was later deleted, which is why
+  -- this is SET NULL rather than CASCADE: removing a user must not erase
+  -- the record that they acted.
+  actor_user_id          BIGINT              REFERENCES users (id) ON DELETE SET NULL,
+  actor_role             user_role,
+
+  from_status            food_request_status,
+  to_status              food_request_status NOT NULL,
+  -- The quantity in play for this step (what was asked for, what was
+  -- reserved, what was collected).
+  quantity               NUMERIC(10, 2),
+  -- The listing's available_quantity immediately after this step. Reading
+  -- these down the column shows exactly how the reservation moved, which
+  -- is what makes a double-count visible in review.
+  listing_available_after NUMERIC(10, 2),
+  -- Human explanation: the charity's cancellation reason, the restaurant's
+  -- response note, "listing withdrawn by the restaurant".
+  note                   TEXT,
+
+  created_at             TIMESTAMPTZ         NOT NULL DEFAULT now(),
+
+  CONSTRAINT food_request_events_quantity_positive
+    CHECK (quantity IS NULL OR quantity > 0)
+);
+
+CREATE INDEX food_request_events_request_id_idx
+  ON food_request_events (food_request_id, created_at);
+CREATE INDEX food_request_events_listing_id_idx
+  ON food_request_events (food_listing_id, created_at);
+-- "What changed on this platform, newest first?" — the moderation view.
+CREATE INDEX food_request_events_created_at_idx
+  ON food_request_events (created_at DESC);
 
 -- =====================================================================
 -- donations

@@ -408,7 +408,12 @@ async function seedFoodRequests(client) {
       15,
       'PORTIONS',
       'We can collect by van this evening and distribute at tonight shelter service.',
-      'ACCEPTED',
+      // COMPLETED, not ACCEPTED: the seed also writes the donation receipt
+      // for this request below, and the workflow only ever creates a
+      // donation when the charity confirms collection — which is exactly
+      // the transition that completes a request. Keeping the two in step
+      // means the fixture obeys the same rule the API enforces.
+      'COMPLETED',
       2,
       inHours(-1),
       'Collected 15 of 40 portions; remainder still available.',

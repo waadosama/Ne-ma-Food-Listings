@@ -2,6 +2,12 @@
 // rules, run against a live server. Not part of the app — this is the
 // evidence that the business rules actually hold.
 import { setTimeout as sleep } from 'node:timers/promises';
+import dotenv from 'dotenv';
+
+// Reads backend/.env so the administrator credential here matches the one
+// the seed actually provisioned. The seed sources it from the environment,
+// so a test that hardcoded an address would break the moment either changed.
+dotenv.config();
 
 const BASE = process.env.BASE_URL || 'http://localhost:3001/api';
 
@@ -44,11 +50,27 @@ async function call(label, { method = 'GET', path, token, body, expect, code }) 
   return { status: res.status, json };
 }
 
-const ADMIN = { email: 'nema.admin@example.com', password: 'DevPassword123!' };
-const RESTAURANT = { email: 'sara.tamimi@goldenoven.example.com', password: 'DevPassword123!' };
-const RESTAURANT2 = { email: 'omar.haddad@datepalm.example.com', password: 'DevPassword123!' };
-const CHARITY_VERIFIED = { email: 'layla.nasser@hopehand.example.com', password: 'DevPassword123!' };
-const CHARITY_PENDING = { email: 'yusuf.rahman@tableforall.example.com', password: 'DevPassword123!' };
+// The four non-admin accounts share the seeded development fixture password.
+// The administrator is different: the seed takes its credential from the
+// environment, so this test reads the same variables rather than assuming a
+// fixed value. ADMIN_PASSWORD is required here because every organization
+// verification check in this suite depends on being able to act as admin.
+const DEV_PASSWORD = 'DevPassword123!';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'nema.admin@example.com';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || DEV_PASSWORD;
+
+if (!process.env.ADMIN_PASSWORD) {
+  console.warn(
+    'ADMIN_PASSWORD is not set — falling back to the development fixture ' +
+      'password. Set it in backend/.env to match the seeded administrator.'
+  );
+}
+
+const ADMIN = { email: ADMIN_EMAIL, password: ADMIN_PASSWORD };
+const RESTAURANT = { email: 'sara.tamimi@goldenoven.example.com', password: DEV_PASSWORD };
+const RESTAURANT2 = { email: 'omar.haddad@datepalm.example.com', password: DEV_PASSWORD };
+const CHARITY_VERIFIED = { email: 'layla.nasser@hopehand.example.com', password: DEV_PASSWORD };
+const CHARITY_PENDING = { email: 'yusuf.rahman@tableforall.example.com', password: DEV_PASSWORD };
 
 async function login(creds) {
   const res = await fetch(`${BASE}/auth/login`, {
@@ -391,6 +413,68 @@ if (expiredId) {
     token: tokens.CHARITY_VERIFIED, expect: 400, code: 'DEADLINE_IN_PAST',
   });
 }
+
+console.log('\n=== 12. Administrator oversees every organization ===');
+// The admin is the only account that can see across tenants. It reads every
+// organization's listings and their incoming requests, but it belongs to no
+// organization of its own, so it must not be able to publish, edit or cancel
+// anything — a listing is writable solely by the restaurant that owns it.
+const adminListings = await call('admin lists every listing', {
+  path: '/food-listings', token: tokens.ADMIN, expect: 200,
+});
+const adminOrgs = new Set((adminListings.json?.listings ?? []).map((l) => l.organizationId));
+console.log(`    -> ${adminListings.json?.listings?.length} listings across ${adminOrgs.size} organization(s)`);
+if (adminOrgs.size < 2) {
+  console.log('  FAIL  admin should see listings from more than one organization');
+  fail += 1;
+} else {
+  pass += 1;
+}
+await call('admin filters by status', {
+  path: '/food-listings?status=CANCELLED', token: tokens.ADMIN, expect: 200,
+});
+await call('admin reads a listing owned by another org', {
+  path: '/food-listings/1', token: tokens.ADMIN, expect: 200,
+});
+await call('admin reads that listing\'s incoming requests', {
+  path: '/food-listings/1/requests', token: tokens.ADMIN, expect: 200,
+});
+
+// A restaurant, by contrast, sees only its own organization's listings and
+// cannot use another org's id to probe.
+const saraListings = await call('restaurant lists only its own', {
+  path: '/food-listings', token: tokens.RESTAURANT, expect: 200,
+});
+const saraOrgs = new Set((saraListings.json?.listings ?? []).map((l) => l.organizationId));
+console.log(`    -> restaurant sees organizations: ${[...saraOrgs].join(', ')}`);
+if (saraOrgs.size > 1) {
+  console.log('  FAIL  restaurant must not see other organizations\' listings');
+  fail += 1;
+} else {
+  pass += 1;
+}
+
+// Writes stay with the owning restaurant.
+await call('POST /food-listings as admin -> 403', {
+  method: 'POST', path: '/food-listings', token: tokens.ADMIN, body: listing,
+  expect: 403, code: 'INSUFFICIENT_ROLE',
+});
+await call('PATCH /food-listings/:id as admin -> 403', {
+  method: 'PATCH', path: '/food-listings/1', token: tokens.ADMIN,
+  body: { foodName: 'admin should not edit this' },
+  expect: 403, code: 'INSUFFICIENT_ROLE',
+});
+await call('PATCH /food-listings/:id/cancel as admin -> 403', {
+  method: 'PATCH', path: '/food-listings/1/cancel', token: tokens.ADMIN,
+  body: { reason: 'admin should not cancel this' },
+  expect: 403, code: 'INSUFFICIENT_ROLE',
+});
+const untouched = await call('listing 1 is unchanged after admin write attempts', {
+  path: '/food-listings/1', token: tokens.ADMIN, expect: 200,
+});
+const unchanged = untouched.json?.listing?.foodName !== 'admin should not edit this';
+console.log(`    -> foodName still "${untouched.json?.listing?.foodName}"`);
+if (unchanged) pass += 1; else { console.log('  FAIL  an admin write went through'); fail += 1; }
 
 console.log('\n=== Summary ===');
 console.log(`  ${pass} passed, ${fail} failed`);
