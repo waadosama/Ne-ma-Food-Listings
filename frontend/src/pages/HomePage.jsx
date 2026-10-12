@@ -1,5 +1,21 @@
 import { Link } from 'react-router-dom';
 import HealthStatus from '../components/HealthStatus.jsx';
+import ListingCard from '../components/ListingCard.jsx';
+import Loading from '../components/ui/Loading.jsx';
+import ErrorState from '../components/ui/ErrorState.jsx';
+import EmptyState from '../components/ui/EmptyState.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
+import { browseApi, ApiError } from '../services/api.js';
+import useAsync from '../hooks/useAsync.js';
+
+// The public face of the platform: mission first, then a live look at what
+// is actually on offer.
+//
+// The preview is real data from `GET /api/browse/listings`. That endpoint
+// belongs to verified charities, so for anyone else the section honestly
+// says so and offers the sign-in path instead of showing a hand-built list
+// of food that may not exist. There is no mocked inventory anywhere in this
+// component.
 
 const foodTypes = [
   {
@@ -22,6 +38,115 @@ const foodTypes = [
   },
 ];
 
+function AvailableNow() {
+  const { role, isVerified, isAuthenticated } = useAuth();
+  const canBrowse = role === 'CHARITY' && isVerified;
+
+  const { status, data, error, reload } = useAsync(
+    async () => (canBrowse ? browseApi.list({ limit: 3 }) : null),
+    [canBrowse]
+  );
+
+  const blocked =
+    error instanceof ApiError && (error.status === 401 || error.status === 403);
+
+  let body;
+
+  if (status === 'loading') {
+    body = <Loading label="جارٍ جلب العروض المتاحة…" />;
+  } else if (blocked) {
+    body = (
+      <EmptyState
+        icon="🔒"
+        title="لعرض الطعام المتاح سجّل دخولك كجمعية معتمدة"
+        hint="تُعرض هذه القائمة للجمعيات المعتمدة فقط، لأنها تعكس كميات حقيقية محجوزة قيد التسليم."
+        action={
+          <div className="state-actions">
+            <Link className="btn btn--primary" to="/login">دخول</Link>
+            <Link className="btn btn--ghost" to="/register">إنشاء حساب جمعية</Link>
+          </div>
+        }
+      />
+    );
+  } else if (status === 'error') {
+    body = <ErrorState error={error} title="تعذّر جلب العروض" onRetry={reload} />;
+  } else if (!data) {
+    body = (
+      <EmptyState
+        icon="🍽"
+        title={
+          isAuthenticated && role === 'RESTAURANT'
+            ? 'انشر فائضك ليراه المجتمع'
+            : 'سجّل دخولك لعرض الطعام المتاح الآن'
+        }
+        hint={
+          role === 'RESTAURANT'
+            ? 'العروض التي تنشرها تظهر فوراً للجمعيات المعتمدة في منطقتها.'
+            : 'القائمة المباشرة متاحة للجمعيات المعتمدة.'
+        }
+        action={
+          <div className="state-actions">
+            {role === 'RESTAURANT' ? (
+              <Link className="btn btn--primary" to="/restaurant/listings/new">نشر عرض جديد</Link>
+            ) : (
+              <Link className="btn btn--primary" to="/login">دخول</Link>
+            )}
+          </div>
+        }
+      />
+    );
+  } else if (data.listings.length === 0) {
+    body = (
+      <EmptyState
+        icon="◇"
+        title="لا توجد عروض متاحة حالياً"
+        hint="تعود القائمة تلقائياً فور نشر مطاعم ومنaklıف الفائض عروضاً جديدة."
+        action={
+          <div className="state-actions">
+            <Link className="btn btn--ghost" to="/browse">كل العروض</Link>
+          </div>
+        }
+      />
+    );
+  } else {
+    body = (
+      <>
+        <div className="listing-grid">
+          {data.listings.map((listing) => (
+            <ListingCard
+              key={listing.id}
+              listing={listing}
+              showOrganization
+              to={canBrowse ? `/browse/${listing.id}` : '/login'}
+            />
+          ))}
+        </div>
+        <div className="section-cta">
+          <Link className="btn btn--primary" to={canBrowse ? '/browse' : '/login'}>
+            تصفّح كل العروض
+          </Link>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <section className="food-section available-section" id="available-now" aria-labelledby="available-title">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow eyebrow-dark">مباشر من المنصة</span>
+          <h2 id="available-title">طعام متاح الآن.</h2>
+        </div>
+        <p>
+          كميات حقيقية منشورة من مطاعم ومناكف معتمدة، مع مواعيد استلام دقيقة.
+        </p>
+      </div>
+
+      <div className="preview-panel">{body}</div>
+    </section>
+  );
+}
+
 function HomePage() {
   return (
     <div className="home-page">
@@ -40,8 +165,8 @@ function HomePage() {
             ليجد الطعام الفائض طريقًا إلى من يحتاجه بدلًا من أن يُهدر.
           </p>
           <div className="hero-actions">
-            <a href="#food-options" className="button button-light">اكتشف الفكرة</a>
-            <Link to="/about" className="hero-text-link">تعرّف على نِعمة <span aria-hidden="true">←</span></Link>
+            <a href="#available-now" className="button button-light">شاهد الفائض المتاح</a>
+            <Link to="/register" className="hero-text-link">انضم إلى نِعمة <span aria-hidden="true">←</span></Link>
           </div>
         </div>
 
@@ -62,6 +187,8 @@ function HomePage() {
         <span className="strip-divider" aria-hidden="true" />
         <span>لأجل مجتمع أقل هدرًا</span>
       </section>
+
+      <AvailableNow />
 
       <section className="food-section" id="food-options">
         <div className="section-heading">
@@ -108,15 +235,15 @@ function HomePage() {
           <article className="process-step">
             <span className="step-number">02</span>
             <div>
-              <h3>تنسّق الجمعية الاستلام</h3>
-              <p>تختار الجمعية ما يناسب احتياجات المستفيدين ووقت التوزيع.</p>
+              <h3>توافق الجمعية على الطلب</h3>
+              <p>يراجع المطعّم الطلب، فتُحجز الكمية فوراً ويُحدَّث المتاح على العرض.</p>
             </div>
           </article>
           <article className="process-step">
             <span className="step-number">03</span>
             <div>
               <h3>تصل النعمة لمستحقيها</h3>
-              <p>يُوزّع الطعام في الوقت المناسب وبطريقة تحفظ قيمته.</p>
+              <p>تؤكد الجمعية استلامها، فيُقيَّد التبرع وتُحتسب أرقام الأثر.</p>
             </div>
           </article>
         </div>
@@ -130,11 +257,11 @@ function HomePage() {
         <div className="faq-list">
           <details>
             <summary>من يمكنه المساهمة بالطعام؟</summary>
-            <p>المطاعم والمخابز ومقدمو الطعام الذين لديهم فائض صالح للتوزيع.</p>
+            <p>المطاعم والمخابز ومقدمو الطعام الذين لديهم فائض صالح للتوزيع، بعد اعتماد المنصّة لمنظمهم.</p>
           </details>
           <details>
             <summary>من يستلم الطعام المتبرع به؟</summary>
-            <p>الجمعيات والجهات الخيرية المشاركة، لتنسيق استلامه وتوزيعه.</p>
+            <p>الجمعيات والجهات الخيرية المعتمدة، وتُسجَّل عملية الاستلام عبر المنصة.</p>
           </details>
           <details>
             <summary>ما الهدف من نِعمة؟</summary>

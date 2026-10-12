@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getHealth } from '../services/api.js';
+import { healthApi } from '../services/api.js';
 
 // Small diagnostic panel: fetches /api/health through the Vite proxy so we
 // can confirm the frontend, the proxy and the backend are all wired together.
@@ -9,7 +9,7 @@ function HealthStatus() {
   useEffect(() => {
     let cancelled = false;
 
-    getHealth()
+    healthApi.get()
       .then((data) => {
         if (!cancelled) setStatus({ state: 'ok', data });
       })

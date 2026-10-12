@@ -5,11 +5,11 @@
 Ne'ma is a food rescue platform that connects restaurants and bakeries with
 surplus food to verified charities that need food for distribution.
 
-This repository currently contains **Phases 1 through 4**: the project
-scaffold — a React frontend and an Express backend with a health-check
-endpoint — the PostgreSQL database, JWT authentication with roles and
-organization verification, and the food listing API for both sides of the
-marketplace. React pages for these features are not built yet.
+This repository contains **Phases 1 through 5**: the project scaffold, the
+PostgreSQL database, JWT authentication with roles and organization
+verification, the food listing API, the full request → approval → collection
+workflow, and a React frontend wired to those endpoints. Every page reads and
+writes the real REST API — there is no mock layer.
 
 ## Tech stack
 
@@ -45,17 +45,21 @@ nema/
 ├── docs/
 │   └── database.md              # schema, relationships, and seed data explained
 │
-└── frontend/                    # React + Vite
+└── frontend/                    # React + Vite (Arabic-first, RTL)
     ├── .env.example
+    ├── index.html               # lang="ar" dir="rtl", Arabic web fonts
     ├── vite.config.js           # dev server + /api proxy
     └── src/
-        ├── main.jsx             # entry point
-        ├── App.jsx              # route definitions
-        ├── layouts/             # page shell (header / nav / footer)
+        ├── main.jsx             # entry point (router + auth provider)
+        ├── App.jsx              # route definitions + role guards
+        ├── assets/styles.css    # the entire design system (no CSS framework)
+        ├── context/             # AuthContext — session, role, login/logout
+        ├── hooks/               # useAsync — loading / error / data cycle
+        ├── layouts/             # MainLayout (public), AppLayout (signed in)
         ├── pages/               # one file per route
-        ├── components/          # reusable UI
-        ├── services/            # API client
-        └── assets/              # styles and static files
+        ├── components/          # reusable UI (ui/ primitives + domain cards)
+        ├── services/api.js      # the only module that calls fetch
+        └── utils/               # Arabic formatting, labels, statistics helpers
 ```
 
 ### Why this layout
@@ -77,6 +81,14 @@ nema/
 - **utils** holds the request validator and the error helpers. The validator
   rejects any body field the endpoint did not declare, which is what stops a
   client from smuggling `role` or `verificationStatus` through registration.
+- **services/api.js** is the single module that performs network I/O. It
+  attaches the bearer token, parses the response, and converts a failure into
+  a typed `ApiError` carrying the backend's own `code`/`message`/`details`.
+  No component calls `fetch`, and no component invents data — the app has no
+  mock layer at all.
+- **context + hooks** keep pages free of plumbing: `AuthProvider` owns the
+  session (re-read from `/auth/me` on boot), and `useAsync` standardises the
+  loading / error / data cycle so every screen can offer the same three states.
 
 ## Prerequisites
 
@@ -300,6 +312,61 @@ Requires the `CHARITY` role **and** a verified organization.
 | GET    | `/browse/listings`          | Active, available, unexpired listings from verified organizations. Filter with `?category=BAKERY` or `?pickupBefore=2026-10-12T18:00:00Z`. |
 | GET    | `/browse/listings/:id`      | Full details for one listing.                  |
 
+### Food requests — the reservation workflow
+
+This is the heart of the platform: a charity asks for part of a listing, the
+restaurant answers, and only a confirmed collection creates a donation.
+
+| Method | Path                                       | Auth    | Notes |
+| ------ | ------------------------------------------ | ------- | ----- |
+| POST   | `/requests`                                | **CHARITY**, verified | Body `{ foodListingId, requestedQuantity, message? }`. The charity comes from the token, never from the body. `400` if the listing is expired/unavailable/over-asked, `409` if this charity already has an open request for it. |
+| GET    | `/requests`                                | **CHARITY** (admin sees all) | Your own requests, newest first. `?status=PENDING`, `?limit`, `?offset`. |
+| GET    | `/requests/:id`                            | owner (admin) | One request **plus its `events` array** — the append-only audit trail, oldest first. |
+| PATCH  | `/requests/:id/cancel`                     | charity owner | Body `{ reason? }`. A `PENDING` cancel releases nothing; cancelling an `ACCEPTED` request returns its quantity to `availableQuantity`. |
+| POST   | `/requests/:id/collect`                    | charity owner | Body `{ handoverNotes? }`. **The only call that creates a donation**, and its quantity is the approved quantity — the client never supplies one. |
+| PATCH  | `/food-listings/:id/requests/:requestId`   | **RESTAURANT** owner | Body `{ decision: "ACCEPTED" \| "REJECTED", responseNote? }`. `responseNote` is required for `REJECTED`. |
+
+Statuses: `PENDING → ACCEPTED | REJECTED | CANCELLED`, `ACCEPTED → COMPLETED |
+CANCELLED`. The service validates every transition against that table, so a
+client cannot skip approval or complete an unapproved request.
+
+```bash
+curl -X POST http://localhost:3001/api/requests \
+  -H "Authorization: Bearer <charity token>" \
+  -H "Content-Type: application/json" \
+  -d '{"foodListingId": 1, "requestedQuantity": 10, "message": "For 40 families"}'
+
+curl -X PATCH http://localhost:3001/api/food-listings/1/requests/7 \
+  -H "Authorization: Bearer <restaurant token>" \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "ACCEPTED"}'
+```
+
+#### How the database prevents over-booking
+
+Two charities asking for the last 10 portions must not be able to take 15.
+Every reservation runs in **one transaction** that does three things:
+
+1. **`SELECT … FOR UPDATE` on the listing row.** The second transaction blocks
+   until the first commits, so they never read the same `available_quantity`
+   at the same time. The lock order is always **listing → request**, which is
+   what makes deadlock impossible.
+2. **A guarded atomic update** — `UPDATE food_listings SET available_quantity
+   = available_quantity - $qty WHERE id = $id AND available_quantity >= $qty`.
+   The condition is evaluated against the locked row, so an approval that no
+   longer fits affects zero rows and is rejected with `400
+   INSUFFICIENT_QUANTITY` rather than driving the count negative.
+3. **`CHECK (available_quantity >= 0)`** on the table, plus a partial unique
+   index preventing two open requests from the same charity on one listing.
+   These are the last line of defence: even a bug in application code cannot
+   commit a negative balance or a duplicate claim.
+
+Availability therefore moves exactly once per transition — approval
+subtracts, cancelling an accepted request adds back, and everything else
+leaves it alone. The `food_request_events` table records the resulting
+balance on every change (`listingAvailableAfter`), so the arithmetic can be
+replayed from the audit trail.
+
 ### Deadlines and safety
 
 `pickupDeadline` and `useByDeadline` are separate fields and neither implies
@@ -337,6 +404,65 @@ failures include a `details` array of `{ field, message }`.
 | 409    | Conflicts with existing data, e.g. duplicate email   |
 | 500    | Unexpected server failure                           |
 
+## Frontend
+
+The React app is Arabic-first and right-to-left (`lang="ar" dir="rtl"`), with a
+warm cream surface, deep green primary, and neutral earthy accents defined as
+tokens at the top of `frontend/src/assets/styles.css`.
+
+### Routes
+
+| Route                                | Role        | Page |
+| ------------------------------------ | ----------- | ---- |
+| `/`                                  | public      | Home — mission, tagline **فائض النهار، رزق لغيرك**, and a live preview of available food |
+| `/about`                             | public      | About |
+| `/login`, `/register`                | public      | Sign in / create an organization |
+| `/browse`, `/browse/:id`             | `CHARITY`   | Available listings, listing details, request form |
+| `/charity`                           | `CHARITY`   | Charity dashboard — statistics and requests awaiting action |
+| `/charity/requests`                  | `CHARITY`   | Request management, status tracking, audit timeline |
+| `/restaurant`                        | `RESTAURANT`| Restaurant dashboard — listings, incoming requests, donation statistics |
+| `/restaurant/listings/new`           | `RESTAURANT`| Create a listing |
+| `/restaurant/listings/:id/edit`      | `RESTAURANT`| Edit a listing |
+| `/restaurant/listings/:id/requests`  | `RESTAURANT`| Inbox for one listing — approve / reject |
+| `/admin`                             | `ADMIN`     | Organization verification queue |
+
+### How the frontend talks to the API
+
+- **`services/api.js`** holds every endpoint, grouped by resource
+  (`authApi`, `browseApi`, `listingsApi`, `requestsApi`, `organizationsApi`,
+  `healthApi`). The token is read from storage at call time and attached as
+  `Authorization: Bearer …`.
+- **`context/AuthContext.jsx`** stores the session. On boot it calls
+  `GET /auth/me`, so the role, active flag and verification status on screen
+  always come from the database rather than from anything cached in the
+  browser.
+- **`components/ProtectedRoute.jsx`** renders a wrong-role visit as an
+  explanation instead of a blank page. It is navigation only: every endpoint
+  behind it re-checks the token, the role and the organization, and the
+  backend remains the sole authority.
+- **`hooks/useAsync.js`** gives every screen the same three states, so the UI
+  can render a spinner, an error with the backend's message and a retry, or an
+  empty state that explains what is missing. None of these fall back to sample
+  data.
+- Quantities, pickup deadlines, locations and statuses are shown on cards as
+  well as on detail pages; donation statistics are counted from completed
+  requests returned by the API, grouped by unit rather than summed across
+  incompatible units.
+
+### Design system
+
+`assets/styles.css` is the whole stylesheet — there is no CSS framework
+beside it. It is organised as design tokens (colour, type, radius, elevation,
+motion), base and accessibility rules, the marketing shell, and one section
+per application concern (buttons, cards, forms, status, lists, dashboards,
+async states, responsive rules). Components reuse `.btn`, `.card`, `.badge`,
+`.chip`, `.field`/`.input`, `.state`, `.alert` and `.stat`, so a PENDING badge
+or an error state looks identical wherever it appears.
+
+Responsive breakpoints stack the navigation behind a menu button at 900px and
+collapse grids, forms and action rows to a single column at 620px. Every
+colour pair used for text clears WCAG AA against its background.
+
 ## Testing the API
 
 `backend/tests/api.test.mjs` is an end-to-end suite covering login,
@@ -344,7 +470,6 @@ registration, privilege-escalation attempts, role and verification gates,
 cross-organization isolation, listing edit/cancel rules, expiry, and the
 administrator's read-across-every-tenant access. It expects a seeded
 database and a running server.
-
 ```bash
 cd backend
 npm run db:reset     # schema + seed
@@ -395,4 +520,8 @@ only talks to one origin. This avoids CORS configuration during development.
 - [x] Phase 2 — PostgreSQL schema, setup script, and seed data
 - [x] Phase 3 — JWT authentication, roles, and organization verification
 - [x] Phase 4 — food listings and matching
-- [ ] Phase 5 — charity and restaurant dashboards
+- [x] Phase 5 — requests, approvals, collection and donations, plus the React
+  frontend (authentication, browse, dashboards, listing forms, request
+  tracking, and organization verification)
+- [ ] Phase 6 — richer matching (distance, scheduling) and reporting on
+  diverted waste

@@ -330,7 +330,7 @@ async function seedFoodListings(client) {
       'PREPARED_MEALS',
       'Contains chicken, rice, and dairy. Allergens: milk. Reheat thoroughly before serving.',
       60,
-      45,
+      60,
       'PORTIONS',
       'Date Palm Kitchen, 44 King Fahd Road, Jeddah — kitchen loading bay',
       inHours(6),
@@ -485,6 +485,67 @@ async function seedFoodRequests(client) {
   );
 }
 
+async function seedFoodRequestEvents(client) {
+  // The API appends one audit row per transition, inside the same
+  // transaction as the change itself. The fixtures above jump straight to
+  // their final status, so without this the seeded requests would open an
+  // empty timeline — which reads as lost history rather than as a fixture.
+  //
+  // Idempotency: food_request_events uses GENERATED ALWAYS identity, so
+  // there is no stable id to upsert on. Each row is guarded by NOT EXISTS
+  // on (food_request_id, event_type), which is unique for these fixtures.
+  //
+  // Timestamps ascend with the ids in insertion order, so the timeline the
+  // API returns (created_at ASC, id ASC) reads as a story: asked → approved
+  // → collected. listing_available_after replays exactly how the reservation
+  // moved: 40 portions untouched at each request, 25 after approval, 25
+  // through collection, because collection changes nothing.
+  const at = (hours) => new Date(Date.now() + hours * 3600_000).toISOString();
+
+  const rows = [
+    // Hope Hand asks for 15 of the bakery's 40 portions.
+    [IDS.requests.charityA, IDS.listings.bakery, 'REQUESTED',
+      IDS.users.charity, 'CHARITY', null, 'PENDING', 15, 40, null, at(-4)],
+    // Table for All asks for 10 of the same listing — still 40 available,
+    // because a PENDING request reserves nothing.
+    [IDS.requests.charityB, IDS.listings.bakery, 'REQUESTED',
+      IDS.users.charity2, 'CHARITY', null, 'PENDING', 10, 40, null, at(-3)],
+    // Hope Hand's second request, against Date Palm's kitchen.
+    [IDS.requests.charityC, IDS.listings.kitchen, 'REQUESTED',
+      IDS.users.charity, 'CHARITY', null, 'PENDING', 45, 60, null, at(-2)],
+    // Golden Oven approves: the 15 move from available to reserved, once.
+    [IDS.requests.charityA, IDS.listings.bakery, 'APPROVED',
+      IDS.users.restaurant, 'RESTAURANT', 'PENDING', 'ACCEPTED', 15, 25,
+      'Collected 15 of 40 portions; remainder still available.', at(-1)],
+    // The charity confirms collection: the request completes and the donation
+    // receipt above is written, but availability does not move again.
+    [IDS.requests.charityA, IDS.listings.bakery, 'COLLECTION_CONFIRMED',
+      IDS.users.charity, 'CHARITY', 'ACCEPTED', 'COMPLETED', 15, 25,
+      'Handed over in 3 sealed crates, all within date.', at(-0.5)],
+  ];
+
+  for (const r of rows) {
+    await client.query(
+      `INSERT INTO food_request_events
+         (food_request_id, food_listing_id, event_type, actor_user_id, actor_role,
+          from_status, to_status, quantity, listing_available_after, note, created_at)
+       SELECT $1, $2,
+              CAST($3 AS food_request_event_type),
+              $4,
+              CAST($5 AS user_role),
+              CAST($6 AS food_request_status),
+              CAST($7 AS food_request_status),
+              $8, $9, $10, $11
+        WHERE NOT EXISTS (
+          SELECT 1 FROM food_request_events
+           WHERE food_request_id = $1
+             AND event_type = CAST($3 AS food_request_event_type)
+        )`,
+      r
+    );
+  }
+}
+
 async function seedDonations(client) {
   // Relative timestamps again: collected shortly after the request was
   // accepted, delivered shortly after that. Fixed dates would drift and
@@ -560,6 +621,7 @@ export default async function seed() {
     await linkUsersToOrganizations(client);
     await seedFoodListings(client);
     await seedFoodRequests(client);
+    await seedFoodRequestEvents(client);
     await seedDonations(client);
     await client.query('COMMIT');
     console.log('Seed complete.');

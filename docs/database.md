@@ -50,6 +50,9 @@ organizations 1 ──────< food_requests     (food_requests.charity_org
 
 food_listings 1 ──────< food_requests     (food_requests.food_listing_id)
 
+food_requests 1 ────────< food_request_events   (append-only, ON DELETE CASCADE)
+food_listings 1 ────────< food_request_events   (denormalised, for audit queries)
+
 food_requests 1 ──────── 1 donations      (donations.food_request_id, UNIQUE)
 food_listings 1 ────────< donations       (donations.food_listing_id)
 organizations 1 ────────< donations       (donations.charity_organization_id)
@@ -63,10 +66,9 @@ One row per account. `role` is an enum: `ADMIN`, `RESTAURANT`, or `CHARITY`.
   `organization_id`.
 - An `ADMIN` belongs to none, which is why that column is nullable.
 
-`password_hash` is `NULL` until authentication is built in a later phase. When
-present it must be a bcrypt hash — the `users_password_hashed` CHECK rejects
-anything that does not start with `$2a$`, `$2b$`, or `$2y$`. Plain-text
-passwords are impossible to store, not merely discouraged.
+`password_hash` is always a bcrypt hash — the `users_password_hashed` CHECK
+rejects anything that does not start with `$2a$`, `$2b$`, or `$2y$`.
+Plain-text passwords are impossible to store, not merely discouraged.
 
 ### organizations
 
@@ -121,6 +123,33 @@ The rule "a charity cannot request more than the listing has left" spans two
 tables, so no CHECK constraint can express it. That belongs in the service
 layer, inside the same transaction that accepts the request.
 
+### food_request_events
+
+The **append-only audit trail** for a request: one row per state change,
+recording who acted, in what role, from which status to which, the quantity in
+play, the listing's `available_quantity` immediately afterwards, and any human
+explanation.
+
+Read down the `listing_available_after` column and the reservation arithmetic
+replays itself — 40 → 25 across an approval, unchanged through collection —
+which is what makes a double-count visible in review rather than something
+you have to reconstruct.
+
+Deliberately append-only: there is no `UPDATE`, no `DELETE`, and no
+`updated_at` or trigger. An audit record that can be rewritten is not an audit
+record. It is a table rather than a status column because the same status can
+be reached different ways — `PENDING → CANCELLED` because the charity changed
+its mind, and `PENDING → CANCELLED` because the restaurant withdrew the
+listing, are identical statuses and completely different facts.
+
+Every write path in `foodRequests.service.js` inserts the event **inside the
+same transaction** as the change it describes, so the history can never
+disagree with the row it documents.
+
+`actor_user_id` is `ON DELETE SET NULL`: removing a user must not erase the
+record that they acted. `food_listing_id` is denormalised so an audit query
+can filter by listing without joining through the request.
+
 ### donations
 
 The receipt for a fulfilled request, recording that food actually changed
@@ -143,8 +172,9 @@ batch turned out not to be fit to move.
 timezone; the database stores an absolute instant.
 
 **`updated_at` is maintained by a trigger.** One shared function,
-`set_updated_at()`, is attached to all five tables, so no service has to
-remember to set it and none can forget.
+`set_updated_at()`, is attached to all five stateful tables, so no service has
+to remember to set it and none can forget. `food_request_events` deliberately
+has neither the column nor the trigger — audit rows never change.
 
 **Enums over check-constrained text.** Closed value sets (`user_role`,
 `organization_type`, `food_unit`, the three status types) are PostgreSQL enum
@@ -163,17 +193,24 @@ types, so an invalid value cannot be written even by a buggy service layer.
 `npm run db:seed` loads development fixtures and is idempotent — every row
 upserts on a fixed id, so re-running changes nothing and never duplicates.
 
-| Table           | Rows | Contents                                                             |
-| --------------- | ---- | -------------------------------------------------------------------- |
-| `users`         | 5    | 1 admin, 2 restaurant users, 2 charity users                          |
-| `organizations` | 4    | 2 verified restaurants, 1 verified charity, 1 pending charity         |
-| `food_listings` | 3    | Two from Golden Oven Bakery, one from Date Palm Kitchen               |
-| `food_requests` | 3    | **Two different charities requesting from the same listing**          |
-| `donations`     | 1    | A delivered 15-portion handover fulfilling the first request          |
+| Table                | Rows | Contents                                                             |
+| -------------------- | ---- | -------------------------------------------------------------------- |
+| `users`              | 5    | 1 admin, 2 restaurant users, 2 charity users                          |
+| `organizations`      | 4    | 2 verified restaurants, 1 verified charity, 1 pending charity         |
+| `food_listings`      | 3    | Two from Golden Oven Bakery, one from Date Palm Kitchen               |
+| `food_requests`      | 3    | **Two different charities requesting from the same listing**          |
+| `food_request_events`| 5    | The audit trail behind those statuses: asked → approved → collected   |
+| `donations`          | 1    | A delivered 15-portion handover fulfilling the first request          |
 
 The seed deliberately demonstrates the listings/requests split: listing 1 has
-one `ACCEPTED` request from Hope Hand Foundation and one `PENDING` request
-from Table for All.
+one `COMPLETED` request from Hope Hand Foundation (its donation receipt and
+its three audit events are written too, so every fixture obeys the same rules
+the API enforces) and one `PENDING` request from Table for All. Listing 2
+carries a second `PENDING` request from Hope Hand.
+
+Each listing's `available_quantity` is consistent with its requests: listing 1
+shows 25 of 40 because 15 were approved and collected, and the other two show
+their full quantity because nothing has been approved against them.
 
 > **Development password for every seeded user: `DevPassword123!`**
 > This is a dev-only credential. It is stored as a bcrypt hash, never in plain
@@ -182,8 +219,33 @@ from Table for All.
 Seed ids are fixed so tests and curl examples can reference them
 (`organizations.id = 1` is Golden Oven Bakery, and so on).
 
-## Not in scope yet
+## What the schema is responsible for
 
-Authentication, authorization, and the business workflows (accepting a
-request, decrementing `available_quantity`, recording a donation) are later
-phases. This phase defines the schema those features will be built on.
+Authentication, authorization and the business workflows are implemented, not
+deferred: `src/services/` holds the request workflow (create, approve, reject,
+cancel, confirm collection) and the verification decision. The schema's job is
+to make the rules those services implement **unbreakable even by a bug**:
+
+- `food_listings_available_range` makes a negative `available_quantity`
+  impossible to commit, whatever the application sends.
+- `food_requests_open_unique` makes two open requests from the same charity on
+  one listing impossible.
+- `donations_food_request_unique` makes two receipts for one request
+  impossible.
+- The status CHECK pairings keep `cancelled`/`cancellation_reason` and
+  `verified_at`/`verification_status` from ever disagreeing.
+- `donations_delivered_after_collected` refuses a delivery timestamp that
+  precedes the collection it reports.
+
+What the schema intentionally does *not* enforce — because it spans two rows —
+is "a charity may not ask for more than is left". That rule lives in the
+service layer, inside a transaction that locks the listing row and performs a
+guarded atomic subtraction, so concurrent requests serialize instead of both
+reading the same balance.
+
+## Not modelled
+
+Delivery logistics beyond the donation's `delivery_status` columns, distance
+and routing, scheduling beyond a single `pickup_deadline`, and notifications.
+These are product features, not integrity rules; none of them weaken the
+constraints above when added.
