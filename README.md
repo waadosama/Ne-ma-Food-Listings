@@ -482,31 +482,6 @@ non-zero if any check fails. It reads `ADMIN_EMAIL` / `ADMIN_PASSWORD` from
 `backend/.env` so it can act as the administrator, matching whatever the seed
 provisioned.
 
-## Environment variables
-
-### Backend (`backend/.env`)
-
-| Variable        | Default                    | Purpose                          |
-| --------------- | -------------------------- | -------------------------------- |
-| `PORT`          | `3001`                     | Port the API listens on          |
-| `NODE_ENV`      | `development`              | Environment name                 |
-| `DATABASE_URL`  | `postgres://localhost:5432/nema` | PostgreSQL connection string — read by the app and by `npm run db:setup` |
-| `JWT_SECRET`    | *(ephemeral in dev)*       | Signing key for access tokens. Generate one with `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`. If unset in development the server still boots but every token is rejected after a restart; production refuses to start unless it is set and at least 32 characters. |
-| `JWT_EXPIRES_IN`| `1d`                       | Access token lifetime, e.g. `15m`, `2h`, `1d` |
-| `BCRYPT_ROUNDS` | `10`                       | Password hashing cost. Raising it makes login slower and cracking slower still. |
-| `ADMIN_EMAIL`   | `nema.admin@example.com`   | Email of the single administrator created by `npm run db:reset`. |
-| `ADMIN_PASSWORD`| *(none)*                   | Password for that administrator. **Required in production** — the seed refuses to run without it. In development a missing value seeds a well-known throwaway password and warns. Generate one with `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"`. |
-| `ADMIN_FIRST_NAME` | `Nema`                  | Display name for the seeded administrator.      |
-| `ADMIN_LAST_NAME`  | `Admin`                 | Display name for the seeded administrator.      |
-
-### Frontend (`frontend/.env`)
-
-| Variable           | Default | Purpose                                      |
-| ------------------ | ------- | -------------------------------------------- |
-| `VITE_API_BASE_URL`  | `/api`  | Base URL for API calls. Keep `/api` in dev — the Vite dev server proxies it to the backend, so no CORS setup is needed. |
-
-## How requests flow in development
-
 ```
 Browser  →  Vite dev server (:5173)  →  /api/* proxied  →  Express (:3001)
 ```
@@ -514,14 +489,4 @@ Browser  →  Vite dev server (:5173)  →  /api/* proxied  →  Express (:3001)
 The Vite dev server forwards any `/api` request to the backend, so the browser
 only talks to one origin. This avoids CORS configuration during development.
 
-## Roadmap
 
-- [x] Phase 1 — project scaffold, health check, database groundwork
-- [x] Phase 2 — PostgreSQL schema, setup script, and seed data
-- [x] Phase 3 — JWT authentication, roles, and organization verification
-- [x] Phase 4 — food listings and matching
-- [x] Phase 5 — requests, approvals, collection and donations, plus the React
-  frontend (authentication, browse, dashboards, listing forms, request
-  tracking, and organization verification)
-- [ ] Phase 6 — richer matching (distance, scheduling) and reporting on
-  diverted waste
